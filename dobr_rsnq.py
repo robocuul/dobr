@@ -43,7 +43,7 @@ from scipy.optimize import brentq
 import dobr_dist
 
 # Constants
-VERSION = 250214
+VERSION = 250825
 EPS = 1.e-7             # Default accuracy (epsilon)
 DEF_TARGET = 0.95       # Default service target for the reorder level
 FCC_UMAX = 3
@@ -51,7 +51,7 @@ FCC_UMAX = 3
 # Constants for the accuracy of the results
 VAL_EXACT = 0           # Result is exact
 VAL_APPROX = 1          # Results is based on an approximation
-VAL_CI = 2              # Results is based on an approximation and in the 
+VAL_CI = 2              # Results is based on an approximation and in the
                         # confidence interval (CI) of the simulation
 VAL_NOTAPPLIC = 3       # KPI is not applicable for the given parameters
 VAL_NOTYET = 4          # No results are available yet
@@ -126,8 +126,8 @@ KPI_CATALOGUE = {
     "ENCR" : "Expected conc. backroom trips E[NCR]"}
 
 def validate_input(value,
-                   noneg_val=False, nozero_val=False, pos_val=False,
-                   int_val=False, ub_1=False, ub_1eps=False):
+                   noneg_val=False, zero_val=False, nozero_val=False,
+                   pos_val=False, int_val=False, ub_1=False, ub_1eps=False):
     """ Generic validator for DoBr functions."""
     # Is the input a number?
     try:
@@ -135,6 +135,7 @@ def validate_input(value,
         input_value = float(value)
         # Check the requested conditions
         if ((noneg_val and input_value < 0.)
+            or (zero_val and abs(input_value) > EPS)
             or (nozero_val and abs(input_value) < EPS)
             or (pos_val and input_value < EPS)
             or (int_val and int(input_value) != input_value)
@@ -293,22 +294,12 @@ class InvSys(abc.ABC):
         """
         # Still free from validation errors (from subclasses)?
         self.dobr_error = sub_error
-        # Assign parameters to attributes and check validity
-        if self.dobr_error == 0 and validate_input(leadtime, noneg_val=True):
-            self.leadtime = leadtime
-        else:
-            self.dobr_error = -9904
-        if self.dobr_error == 0 and validate_input(reviewperiod, pos_val=True):
-            self.reviewperiod = reviewperiod
-        else:
-            self.dobr_error = -9906
-        if self.dobr_error == 0 and validate_input(mean_perioddemand, pos_val=True):
-            self.mean = mean_perioddemand
-        else:
-            self.dobr_error = -9907
-        if self.dobr_error == 0 and validate_input(stdev_perioddemand,
-                                                   nozero_val=True):
-            if stdev_perioddemand < -EPS:
+        self.val_functions = {}
+        # Assign parameters to attributes
+        self.mean = mean_perioddemand
+        self.val_functions["mean"] = self._val_mean
+        if self.mean > 0.:
+            if stdev_perioddemand < 0.:
                 # Apply power law
                 self.variance = stdev_powerlaw(self.mean)**2
             else:
@@ -316,21 +307,31 @@ class InvSys(abc.ABC):
             # Determine the Variance-To-Mean (VTM)
             self.vtm = self.variance/self.mean
         else:
-            self.dobr_error = -9908
-        if self.dobr_error == 0 and validate_input(ioq, noneg_val=True):
-            self.ioq = ioq
-        else:
-            self.dobr_error = -9911
-        if self.dobr_error == 0 and validate_input(moq, noneg_val=True):
-            self.moq = moq
-        else:
-            self.dobr_error = -9913
-        if self.dobr_error == 0 and validate_input(shelflife, noneg_val=True):
-            self.shelflife = shelflife
-        else:
-            self.dobr_error = -9930
-        if self.dobr_error == 0 and validate_input(stdev_leadtime, noneg_val=True):
-            self.stdev_leadtime = stdev_leadtime
+            self.variance = 0.
+            self.vtm = 0.
+        self.val_functions["variance"] = self._val_variance
+        self.leadtime = leadtime
+        self.val_functions["leadtime"] = self._val_leadtime
+        self.stdev_leadtime = stdev_leadtime
+        self.val_functions["stdev_leadtime"] = self._val_stdev_leadtime
+        self.reviewperiod = reviewperiod
+        self.val_functions["reviewperiod"] = self._val_reviewperiod
+        self.ioq = ioq
+        self.val_functions["ioq"] = self._val_ioq
+        self.moq = moq
+        self.val_functions["moq"] = self._val_moq
+        self.shelflife = shelflife
+        self.val_functions["shelflife"] = self._val_shelflife
+
+        # Check validity
+        # for val_func in self.val_functions.values():
+        for key in self.val_functions:
+            self.dobr_error = self.val_functions[key]()
+            if self.dobr_error < 0:
+                break
+
+        self.var_leadtime = 0.
+        if self.dobr_error == 0:
             # Determine lead-time variance
             if self.stdev_leadtime > EPS:
                 # Approximation of the standard deviation of the ELT
@@ -340,47 +341,80 @@ class InvSys(abc.ABC):
                 self.var_leadtime = (self.stdev_leadtime
                     *(1.0-0.8758*math.exp(-1.0898*tbo/self.stdev_leadtime)))**2
                 # print("TBO", tbo, "Eff StDev LT", math.sqrt(self.var_leadtime))
-            else:
-                self.var_leadtime = 0.
-        else:
-            self.dobr_error = -9905
 
         # Default distribution is not discrete
         self.discrete = False
         self.lost_sales = False
 
+    def _val_mean(self):
+        # Check the value of the leadtime
+        if validate_input(self.mean, pos_val=True):
+            return 0
+        return -9907
+
+    def _val_variance(self):
+        # Check the value of the variance
+        if validate_input(self.variance, pos_val=True):
+            return 0
+        return -9908
+
+    def _val_leadtime(self):
+        # Check the value of the leadtime
+        if validate_input(self.leadtime, noneg_val=True):
+            return 0
+        return -9904
+                
+    def _val_stdev_leadtime(self):
+        # Check the value of the stdev leadtime
+        if validate_input(self.stdev_leadtime, noneg_val=True):
+            return 0
+        return -9905
+                
+    def _val_reviewperiod(self):
+        # Check the value of the reviewperiod
+        if validate_input(self.reviewperiod, pos_val=True):
+            return 0
+        return -9906
+                
+    def _val_ioq(self):
+        # Check the value of the IOQ
+        if validate_input(self.ioq, noneg_val=True):
+            return 0
+        return -9911
+                
+    def _val_moq(self):
+        # Check the value of the MOQ
+        if validate_input(self.moq, noneg_val=True):
+            return 0
+        return -9913
+                
+    def _val_shelflife(self):
+        # Check the value of the shelflife
+        if validate_input(self.shelflife, noneg_val=True, int_val=True):
+            return 0
+        return -9931
+                
     def _val_unitcap(self, unitcap):
         # Check the value of the unit capacity
-        if self.dobr_error == 0:
-            if validate_input(unitcap, noneg_val=True):
-                ioq_mult = unitcap/max(1.0, self.ioq)
-                if abs(ioq_mult - int(ioq_mult)) > EPS:
-                    self.dobr_error = -9926
-                    return False
-                return True
-            self.dobr_error = -9925
-            return False
-        return False
+        if validate_input(unitcap, noneg_val=True):
+            ioq_mult = unitcap/max(1.0, self.ioq)
+            if abs(ioq_mult - int(ioq_mult)) > EPS:
+                return -9926
+            return 0
+        return -9925
 
     def _val_shelfspace(self, capacity):
         # Check the value of the (shelf) capacity
-        if self.dobr_error == 0:
-            if validate_input(capacity, noneg_val=True):
-                return True
-            self.dobr_error = -9927
-            return False
-        return False
+        if validate_input(capacity, noneg_val=True):
+            return 0
+        return -9927
 
     def _val_target(self, target):
-        if self.dobr_error == 0:
-            if validate_input(target, pos_val=True):
-                if validate_input(target, ub_1eps=True):
-                    return True
-                self.dobr_error = -9929
-                return False
-            self.dobr_error = -9928
-            return False
-        return False
+        if validate_input(target, pos_val=True):
+            if validate_input(target, ub_1eps=True):
+                return 0
+            return -9929
+        return -9928
 
     def _max_oq(self):
         return max(self.ioq, self.moq)
@@ -529,12 +563,12 @@ class InvSys(abc.ABC):
             eioh_rl = self._eioh("RL", reorderlevel)
         return max(0., (eioh_l-eioh_rl)/(self.reviewperiod*self.mean))
 
-    def readyrate(self, reorderlevel, acc=False):
+    def readyrate(self, reorderlevel, min_inv=0, acc=False):
         """Return the discrete ready rate."""
         if self.dobr_error == 0:
             reorderlevel = self.adjust_rol(reorderlevel)
             # Discrete ready rate = P[D_RL>s]
-            return self._poc("RL", reorderlevel, acc=acc)
+            return self._poc("RL", reorderlevel, capacity=min_inv, acc=acc)
         return self.dobr_error
 
     def servdiffrate(self, reorderlevel, acc=False):
@@ -684,7 +718,9 @@ class InvSys(abc.ABC):
         reorderlevel -- the reorder level (default 0)
         unitcap      -- the capacity (default 0)
         """
-        if self.dobr_error == 0 and self._val_unitcap(unitcap):
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_unitcap(unitcap)
+        if self.dobr_error == 0:
             reorderlevel = self.adjust_rol(reorderlevel)
             return self._eua(reorderlevel, unitcap, acc=acc)
         return self.dobr_error
@@ -707,7 +743,9 @@ class InvSys(abc.ABC):
         reorderlevel -- the reorder level (default 0)
         unitcap      -- the capacity (default 0)
         """
-        if self.dobr_error == 0 and self._val_unitcap(unitcap):
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_unitcap(unitcap)
+        if self.dobr_error == 0:
             reorderlevel = self.adjust_rol(reorderlevel)
             eua, val_acc = self._eua(reorderlevel, unitcap, acc=acc)
             eos, val_acc = self.eos(reorderlevel=reorderlevel, acc=acc)
@@ -722,7 +760,9 @@ class InvSys(abc.ABC):
         Keyword arguments:
         capacity -- the capacity (default 0)
         """
-        if self.dobr_error == 0 and self._val_shelfspace(capacity):
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_shelfspace(capacity)
+        if self.dobr_error == 0:
             reorderlevel = self.adjust_rol(reorderlevel)
             capacity = self._adjust_shelfspace(capacity)
             if capacity > EPS:
@@ -740,7 +780,9 @@ class InvSys(abc.ABC):
         Keyword arguments:
         capacity -- the capacity (default 0)
         """
-        if self.dobr_error == 0 and self._val_shelfspace(capacity):
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_shelfspace(capacity)
+        if self.dobr_error == 0:
             reorderlevel = self.adjust_rol(reorderlevel)
             capacity = self._adjust_shelfspace(capacity)
             if capacity > EPS:
@@ -757,21 +799,17 @@ class InvSys(abc.ABC):
         Keyword arguments:
         capacity -- the capacity (default 0)
         """
-        if self.dobr_error == 0 and self._val_shelfspace(capacity):
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_shelfspace(capacity)
+        if self.dobr_error == 0:
             reorderlevel = self.adjust_rol(reorderlevel)
             capacity = self._adjust_shelfspace(capacity)
             if capacity > EPS:
                 enir = 0.
                 poc_l , val_acc = self._poc("L", reorderlevel,
                                             capacity=capacity, acc=True)
-                encr = self._prob_pos_demand(capacity)*poc_l
-                if encr < 0.001:
-                    enir = self._prob_pos_demand(0)*poc_l
-                else:
-                    poc_rl = self._poc("RL", reorderlevel, capacity=capacity)
-                    enir = (poc_l*(self._prob_pos_demand(capacity)
-                                   -self._prob_pos_demand(0))
-                            + poc_rl*encr)
+                # encr = self._prob_pos_demand(capacity)*poc_l
+                enir = self._prob_pos_demand(0)*poc_l # - encr
                 # Return only positive values
                 enir = max(0., enir)
                 if acc:
@@ -789,7 +827,9 @@ class InvSys(abc.ABC):
         Keyword arguments:
         capacity -- the capacity (default 0)
         """
-        if self.dobr_error == 0 and self._val_shelfspace(capacity):
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_shelfspace(capacity)
+        if self.dobr_error == 0:
             reorderlevel = self.adjust_rol(reorderlevel)
             capacity = self._adjust_shelfspace(capacity)
             if capacity > EPS:
@@ -799,8 +839,8 @@ class InvSys(abc.ABC):
             return 0.
         return self.dobr_error
 
-    def targetfillrate(self, target_fr,
-                       xguess=None, yguess=None, xtol=0.001, acc=False):
+    def targetfillrate(self, target_fr, xtol=0.001,
+                       xguess=None, yguess=None, acc=False):
         """ Return the minimum reorder level that gives the target fill rate.
 
         Keyword arguments:
@@ -808,16 +848,18 @@ class InvSys(abc.ABC):
         yguess -- Value for the fill rate at the initial guess
         xtol   -- Absolute interval for the returned reorder level (default = 0.001)
         """
-        if (self.dobr_error == 0 and self._val_target(target_fr)):
-            rol = self._targetrate(self._root_fr, target_fr,
-                                   xguess, yguess, xtol)
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_target(target_fr)
+        if self.dobr_error == 0:
+            rol = self._targetrate(self._root_fr, target_fr, xtol, min_inv=0,
+                                   xguess=xguess, yguess=yguess)
             if acc:
                 return rol, self.accuracy()
             return rol
         return self.dobr_error
 
-    def targetreadyrate(self, target_rr,
-                        xguess=1., yguess=-1., xtol=0.001, acc=False):
+    def targetreadyrate(self, target_rr, xtol=0.001,
+                        xguess=1., yguess=-1., acc=False):
         """ Return the minimum reorder level that gives the target
         discrete ready rate.
 
@@ -826,16 +868,18 @@ class InvSys(abc.ABC):
         yguess -- Value for the ready rate at the initial guess
         xtol   -- Absolute interval for the returned reorder level (default = 0.001)
         """
-        if (self.dobr_error == 0 and self._val_target(target_rr)):
-            rol = self._targetrate(self._root_rr, target_rr,
-                                   xguess, yguess, xtol)
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_target(target_rr)
+        if self.dobr_error == 0:
+            rol = self._targetrate(self._root_rr, target_rr, xtol, min_inv=0,
+                                   xguess=xguess, yguess=yguess)
             if acc:
                 return rol, self.accuracy()
             return rol
         return self.dobr_error
 
-    def targetservdiffrate(self, target_sdr,
-                           xguess=1., yguess=-1., xtol=0.001, acc=False):
+    def targetservdiffrate(self, target_sdr, xtol=0.001,
+                           xguess=1., yguess=-1., acc=False):
         """ Return the minimum reorder level that gives the target
         service differentiation rate.
 
@@ -844,9 +888,11 @@ class InvSys(abc.ABC):
         yguess -- Value for the service differentiation rate at the initial guess
         xtol   -- Absolute interval for the returned reorder level (default = 0.001)
         """
-        if (self.dobr_error == 0 and self._val_target(target_sdr)):
-            rol = self._targetrate(self._root_sdr, target_sdr,
-                                   xguess, yguess, xtol)
+        if self.dobr_error == 0:
+            self.dobr_error = self._val_target(target_sdr)
+        if self.dobr_error == 0:
+            rol = self._targetrate(self._root_sdr, target_sdr, xtol, min_inv=0,
+                                   xguess=xguess, yguess=yguess)
             if acc:
                 return rol, self.accuracy()
             return rol
@@ -873,35 +919,38 @@ class InvSys(abc.ABC):
         """Return the default response to out-of-stocks."""
         return "back ordering"
 
-    def _root_fr(self, reorderlevel, target_fr):
+    def _root_fr(self, reorderlevel, target_fr, min_inv=0):
         # Return the fill rate minus the target.
+        # Parameter min_inv is never used
         return self._fr(reorderlevel) - target_fr
 
-    def _root_rr(self, reorderlevel, target_rr):
+    def _root_rr(self, reorderlevel, target_rr, min_inv=0):
         # Return the discrete ready rate minus the target.
         # Discrete ready rate = P[D_RL>s]
-        rr = self._poc("RL", reorderlevel)
+        rr = self._poc("RL", reorderlevel, capacity=min_inv)
         return rr - target_rr
 
-    def _root_sdr(self, reorderlevel, target_sdr):
+    def _root_sdr(self, reorderlevel, target_sdr, min_inv=0):
         # Return the ratio of poc's minus the target.
+        # Parameter min_inv is never used
         sdr = max(0., self._poc("RL", reorderlevel)
                   /self._poc("L", reorderlevel))
         return sdr - target_sdr
 
-    def _targetrate(self, rate, target, xguess, yguess, xtol):
+    def _targetrate(self, rate, target, xtol, min_inv=0,
+                    xguess=None, yguess=None):
         # Find the reorder level that satisfies the target
         # Start with bracketing
         if xguess is None:
             # Initial guess: 1.5 times mean R+L
             test_rol = self.adjust_rol(max(1.,
                 1.5*(self.reviewperiod+self.leadtime)*self.mean))
-            test_rate = rate(test_rol, target)
+            test_rate = rate(test_rol, target, min_inv=min_inv)
         else:
             # Initial guess is passed
             test_rol = xguess
             if yguess is None:
-                test_rate = rate(test_rol, target)
+                test_rate = rate(test_rol, target, min_inv=min_inv)
             else:
                 # Value of rate at initial guess is passed
                 test_rate = yguess - target
@@ -921,7 +970,7 @@ class InvSys(abc.ABC):
                                + max(1, (1.-high_rate)*(high_rol-low_rol)
                                      /(high_rate-low_rate)))
 
-                test_rate = rate(test_rol, target)
+                test_rate = rate(test_rol, target, min_inv=min_inv)
                 if -1. < high_rate < 0.:
                     # We have an upper bracket, but not yet above the target
                     # bottom = high
@@ -942,7 +991,7 @@ class InvSys(abc.ABC):
             # Basic bisection: integer reorder level required
             while high_rol - low_rol > 1:
                 test_rol = low_rol + int((high_rol-low_rol)/2)
-                test_rate = rate(test_rol, target)
+                test_rate = rate(test_rol, target, min_inv=min_inv)
                 if test_rate < 0.:
                     low_rol = test_rol
                     low_rate = test_rate
@@ -1041,17 +1090,17 @@ class InvSys(abc.ABC):
         kpi_results = {}
         for kpi in kpi_list:
             # Reset to NOT APPLICABLE
-            kpi_results[kpi] = [0., VAL_NOTAPPLIC]
+            kpi_results[kpi] = (0., VAL_NOTAPPLIC)
 
            # Only calculate if requested
             if kpi == "Fillrate":
                 fr = self._fr(reorderlevel, eioh_l=eioh_l, eioh_rl=eioh_rl)
-                kpi_results[kpi] = [fr, b_acc]
+                kpi_results[kpi] = (fr, b_acc)
                 # kpi_results[kpi] = self.fillrate(reorderlevel, acc=True)
             elif kpi == "Readyrate":
                 kpi_results[kpi] = self.readyrate(reorderlevel, acc=True)
-            elif kpi == "ELT" and self.var_leadtime > EPS:
-                kpi_results[kpi] = [self.leadtime, VAL_EXACT]
+            elif kpi == "ELT" and self.var_leadtime < EPS:
+                kpi_results[kpi] = (self.leadtime, VAL_EXACT)
             elif kpi == "EBO_L" and (not self.lost_sales):
                 kpi_results[kpi] = self._ebo("L", reorderlevel,
                                              eioh=eioh_l, acc=True)
@@ -1059,10 +1108,10 @@ class InvSys(abc.ABC):
                 kpi_results[kpi] = self._ebo("RL", reorderlevel,
                                              eioh=eioh_rl, acc=True)
             elif kpi == "EIOH_L":
-                kpi_results[kpi] = [eioh_l, b_acc]
+                kpi_results[kpi] = (eioh_l, b_acc)
                 # kpi_results[kpi] = self.eioh_l(reorderlevel, acc=True)
             elif kpi == "EIOH_RL":
-                kpi_results[kpi] = [eioh_rl, b_acc]
+                kpi_results[kpi] = (eioh_rl, b_acc)
                 # kpi_results[kpi] = self.eioh_rl(reorderlevel, acc=True)
             elif kpi == "EOL":
                 kpi_results[kpi] = self.eol(reorderlevel=reorderlevel, acc=True)
@@ -1644,14 +1693,14 @@ class InvSysDiscreteBO(InvSys):
         leadtime           -- time between ordering and delivery in periods
 
         Keyword arguments:
-        stdev_leadtime     -- the standard deviation of the leadtime (default 0.0)
-        reviewperiod -- the time between two reviews (default 1.0)
-        ioq          -- the incremental order quantity (default 1)
-        moq          -- the minimal order quantity (default 0)
-        shelflife    -- the remaining shelflife upon entering the stock point
-        printerror   -- print error messages to the console (default True)
-        empiricalpmf -- the empirical pmf for the base period (default None)
-        usecp        -- use Compound Poisson if VTM>1 (default False)
+        stdev_leadtime  -- the standard deviation of the leadtime (default 0.0)
+        reviewperiod    -- the time between two reviews (default 1.0)
+        ioq             -- the incremental order quantity (default 1)
+        moq             -- the minimal order quantity (default 0)
+        shelflife       -- the remaining shelflife upon entering the stock point
+        printerror      -- print error messages to the console (default True)
+        empiricalpmf    -- the empirical pmf for the base period (default None)
+        usecp           -- use Compound Poisson if VTM>1 (default False)
         """
         # Is an empirical discrete distribution given for the base period?
         sub_error = 0
@@ -1672,10 +1721,10 @@ class InvSysDiscreteBO(InvSys):
             ioq=ioq, moq=moq, shelflife=shelflife,
             sub_error=sub_error)
 
-        # Check if ioq and moq are discrete
-        self._val_oq()
-
         if self.dobr_error == 0:
+            # Check if ioq and moq are discrete
+            self.dobr_error = self._val_oq()
+
             # Adjust ioq and moq to integers
             self.ioq = int(round(self.ioq))
             self.moq = max(int(round(self.moq)), self.ioq)
@@ -1711,24 +1760,25 @@ class InvSysDiscreteBO(InvSys):
 
     def _val_oq(self):
         # Check the values of ioq and moq
-        if self.dobr_error == 0 and validate_input(self.ioq, int_val=True):
-            self.ioq = int(self.ioq)
-        else:
-            self.dobr_error = -9912
-        if self.dobr_error == 0 and validate_input(self.moq, int_val=True):
-            self.moq = max(int(round(self.moq)), self.ioq)
-        else:
-            self.dobr_error = -9914
-        if self.dobr_error == 0 and (self.moq > self.ioq
+        if not validate_input(self.ioq, int_val=True):
+            return -9912
+        self.ioq = int(self.ioq)
+        if not validate_input(self.moq, int_val=True):
+            return -9914
+        self.moq = max(int(round(self.moq)), self.ioq)
+        if (self.moq > self.ioq
               and abs(self.moq/self.ioq - int(self.moq/self.ioq)) > EPS):
             # Moq is not an integer multiple of ioq
-            self.dobr_error = -9915
+            return -9915
+        return 0
 
     def _val_shelflife(self):
-        """"Validate the shelf life."""
-        if self.dobr_error == 0:
-            if self.shelflife != 0:
-                self.dobr_error = -9999
+        # Check the value of the shelflife
+        # Only non-perishables allowed with backordering
+        if validate_input(self.shelflife, zero_val=True):
+            self.shelflife = 0.
+            return 0
+        return -9999
 
     def _list_dists(self):
         # Determine which distribution cycles are needed
@@ -1941,7 +1991,7 @@ class InvSysDiscreteBO(InvSys):
             prev_moq = self.moq
             self.ioq = ioq
             self.moq = moq
-            self._val_oq()
+            self.dobr_error = self._val_oq()
             if self.dobr_error == 0:
                 if prev_ioq != self.ioq or prev_moq != self.moq:
                     # Parameters have changed
@@ -2007,7 +2057,7 @@ class InvSysDiscreteBO(InvSys):
 
         if not (self.inv_dist[tau] is None):
             return self.inv_dist[tau]
-        
+
         # Determine requested ioh distribution from ip+ distribution
         if tau == "IOH_L":
             dist_d = self.demand_dist["L"]
@@ -2321,7 +2371,7 @@ class InvSysDiscreteLS(InvSysDiscreteBO):
             mean_perioddemand, stdev_perioddemand, leadtime,
             stdev_leadtime=stdev_leadtime, reviewperiod=reviewperiod,
             ioq=ioq, moq=moq, shelflife=shelflife,
-            printerror=printerror, empiricalpmf=empiricalpmf, usecp=usecp)
+            printerror=False, empiricalpmf=empiricalpmf, usecp=usecp)
 
         # We can not deal yet with L>R
         # TEMP: allow LS2
@@ -2378,14 +2428,14 @@ class InvSysDiscreteLS(InvSysDiscreteBO):
                         self.demand_dist["Mm3"] = None
 
     def _val_shelflife(self):
-        """"Validate the shelf life."""
-        if self.dobr_error == 0:
+        # Check the value of the shelflife
+        if validate_input(self.shelflife, int_val=True):
             if self.shelflife > 0 and self.shelflife <= self.reviewperiod:
-                self.dobr_error = -9930
-            elif abs(self.shelflife - int(self.shelflife)) > EPS:
-                self.dobr_error = -9931
-            else:
-                self.shelflife = min(30, self.shelflife)
+                return -9930
+            # Rescale the shelf life
+            self.shelflife = min(30, self.shelflife)
+            return 0
+        return -9931
 
     @staticmethod
     def order_situation():
@@ -2400,25 +2450,23 @@ class InvSysDiscreteLS(InvSysDiscreteBO):
         capacity -- the capacity (default 0)
         """
         if self.leadtime <= self.reviewperiod:
-            return super().calc_kpis(kpi_list, reorderlevel, 
+            return super().calc_kpis(kpi_list, reorderlevel,
                               unitcap=unitcap, capacity=capacity)
         else:
             kpi_results = {}
             for kpi in kpi_list:
                 # Reset to NOT APPLIC
-                kpi_results[kpi] = [0., VAL_NOTAPPLIC]
+                kpi_results[kpi] = (0., VAL_NOTAPPLIC)
                 # Only calculate if requested
                 if kpi == "Fillrate":
                     kpi_results[kpi] = self.fillrate(reorderlevel, acc=True)
                 elif kpi == "Readyrate":
                     kpi_results[kpi] = self.readyrate(reorderlevel, acc=True)
-                elif kpi == "ELT" and self.var_leadtime > EPS:
-                    kpi_results[kpi] = [self.leadtime, VAL_EXACT]
+                elif kpi == "ELT" and self.var_leadtime < EPS:
+                    kpi_results[kpi] = (self.leadtime, VAL_EXACT)
                 elif kpi == "EIOH_L":
-                    # kpi_results[kpi] = [0., VAL_NOTYET]
                     kpi_results[kpi] = self.eioh_l(reorderlevel, acc=True)
                 elif kpi == "EIOH_RL":
-                    # kpi_results[kpi] = [0., VAL_NOTYET]
                     kpi_results[kpi] = self.eioh_rl(reorderlevel, acc=True)
                 elif kpi == "EOL":
                     kpi_results[kpi] = self.eol(reorderlevel=reorderlevel, acc=True)
@@ -2427,35 +2475,35 @@ class InvSysDiscreteLS(InvSysDiscreteBO):
                 elif kpi == "ESUP":
                     kpi_results[kpi] = self.supply(reorderlevel=reorderlevel, acc=True)
                 elif kpi == "EUA":
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.eua(reorderlevel=reorderlevel,
                     #                           unitcap=unitcap, acc=True)
                 elif kpi == "ENB":
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.enb(reorderlevel=reorderlevel, acc=True)
                 elif kpi == "EUSL_L":
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.eusl_l(reorderlevel=reorderlevel,
                     #                           unitcap=unitcap, acc=True)
                 elif kpi == "EW" and self.shelflife > 0:
                     kpi_results[kpi] = self.ew(reorderlevel, acc=True)
                 elif kpi == "EST":
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.est(reorderlevel, acc=True)
                 elif kpi == "POC" and capacity > 0:
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.poc(reorderlevel,
                     #                          capacity=capacity, acc=True)
                 elif kpi == "EIBR" and capacity > 0:
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.eibr(reorderlevel,
                     #                           capacity=capacity, acc=True)
                 elif kpi == "ENIR" and capacity > 0:
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.enir(reorderlevel,
                     #                           capacity=capacity, acc=True)
                 elif kpi == "ENCR" and capacity > 0:
-                    kpi_results[kpi] = [0., VAL_NOTYET]
+                    kpi_results[kpi] = (0., VAL_NOTYET)
                     # kpi_results[kpi] = self.encr(reorderlevel,
                     #                          capacity=capacity, acc=True)
             return kpi_results
@@ -2760,7 +2808,7 @@ class InvSysDiscreteLS(InvSysDiscreteBO):
             eioh_l = 0
             for i in range(1, reorderlevel+1):
                 eioh_l += i*dist_ioh[i]
-        
+
             excess_pmf = np.sum(dist_ioh) - 1.0
             x += 1
         # Remove remainder pmf
@@ -2869,7 +2917,7 @@ class InvSysDiscreteLS(InvSysDiscreteBO):
                     eioh = eioh_rl
                 elif cycle == "L":
                     eioh = fr*self.reviewperiod*self.mean + eioh_rl
-                    
+
             # Return only positive values
             eioh = max(0., eioh)
             if acc:
@@ -3000,12 +3048,12 @@ class InvSysDiscreteLS(InvSysDiscreteBO):
                  + super()._eioh("L1R", reorderlevel))
         # Cs factor is modified to deal with Q>1
         cs = (reorderlevel + (self._max_oq()-1)/2) / denom
-        
+
         return cs*(eioh_l_bo - eioh_rl_bo)/(self.reviewperiod*self.mean)
 
     def _fr_ls3(self, reorderlevel):
-        """ Fill rate approximation LS3, based on 
-        Van Donselaar & Broekmeulen (IJPE, 2013). 
+        """ Fill rate approximation LS3, based on
+        Van Donselaar & Broekmeulen (IJPE, 2013).
         """
         # First, determine the lower bound based on backordering
         test = InvSysDiscreteBO(self.mean, self.variance**0.5,
