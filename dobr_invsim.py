@@ -73,7 +73,6 @@ DEFAULT_SIM = {
     "warmup" : 100,
     "nrperiods" : 10000,
     "poissonprocess" : False,
-    "weekpattern" : False,
     "reportpmfs": True}
 
 # PMF of IOH and IP ID's (only PMFs with values greater than -1 are collected)
@@ -98,15 +97,12 @@ def precision(sumx, sumx2, n_val, alpha=0.05):
             prec = t_test.ppf(1.-alpha/2, n_val-1)*((sample_var/n_val)**0.5)
     return prec
 
-def cycle_ref(weekday, weekpattern=False):
+def cycle_ref(weekday):
     """ Circular reference. """
-    if weekpattern:
-        weekday += 1
-        if weekday >= MAXWEEKDAYS:
-            weekday = 0
+    weekday += 1
+    if weekday >= MAXWEEKDAYS:
+        weekday = 0
     return weekday
-
-
 
 
 class SimResult:
@@ -206,10 +202,72 @@ class EventData:
         return (self.time < other.time
                 or (self.time == other.time and self.etype < other.etype))
 
+class OrderSchedule:
+    """ A class to manage the order schedule. """
+
+    def __init__(self, leadtime, reviewperiod=1, schedule=None, week_pattern=False):
+        self.leadtime = leadtime
+        self.reviewperiod = reviewperiod
+        self.week_pattern = week_pattern
+        # if self.week_pattern:
+        if schedule is None:
+            # Fill the schedule with the passed leadtime (review period=1)
+            self.schedule = [leadtime]*MAXWEEKDAYS
+        else:
+            self.schedule = schedule
+
+    def review(self,weekday):
+        """ Check if the passed weekday is an review moment. """
+        if self.schedule[weekday] != -1:
+            return True
+        return False
+
+    def curr_lt(self, weekday=0):
+        """ Return the leadtime if we would order now. """
+        if self.week_pattern:
+            return self.schedule[weekday]
+        return self.leadtime
+
+    def curr_rp(self, weekday=0):
+        """ Return the time until the next review period. """
+        if self.week_pattern:
+            if not self.review(weekday):
+                return -1
+            rp = 1
+            day = cycle_ref(weekday)
+            while not self.review(day):
+                day = cycle_ref(day)
+                rp += 1
+            return rp
+        return self.reviewperiod
+
+    def next_lt(self, weekday=0):
+        """ Return the leadtime at the next review period. """
+        if self.week_pattern:
+            if not self.review(weekday):
+                return -1
+            day = cycle_ref(weekday)
+            while not self.review(day):
+                day = cycle_ref(day)
+            return self.schedule[day]
+        return self.leadtime
+
+    def avg_rp(self):
+        """ Return the average length of the review period. """
+        if self.week_pattern:
+            sum_rp = 0.
+            for day in range(MAXWEEKDAYS):
+                if self.review(day):
+                    sum_rp += 1
+            return MAXWEEKDAYS/sum_rp
+        return self.reviewperiod
+
+
 class DemandStream:
     """ A class to manage demand streams. """
 
-    def __init__(self, sku_param, sim_param, weekday=0, weekfraction=None):
+    def __init__(self, sku_param, sim_param, weekday=0,
+                 weekfraction=None, week_schedule=None):
         self.distribution_type = sku_param["distribution"]
         self.horizon = sim_param["warmup"] + sim_param["nrperiods"]
         self.weekday = weekday
@@ -228,8 +286,10 @@ class DemandStream:
         self.grab_random = 0
 
         # Lead-time distribution? Not dependent on mean demand
+        # and only allowed without varying schedule
         self.lt_random = 0
-        if sku_param["leadtime"] > dobr.EPS and sku_param["stdev_leadtime"] > dobr.EPS:
+        if ((week_schedule is None) and sku_param["leadtime"] > dobr.EPS
+            and sku_param["stdev_leadtime"] > dobr.EPS):
             self.lt_random = 1
             self.stream_lt = None
 
@@ -237,7 +297,7 @@ class DemandStream:
             self.stream_demand = None
             # Random grabbing?
             self.lifo = 1.0 - sku_param["fifo"]
-            if self.lifo > 0. and self.lifo < 1.:
+            if sku_param["fifo"] == -1.0 or (self.lifo > 0. and self.lifo < 1.):
                 self.grab_random = 1
                 self.stream_grab = None
             # Poisson process?
@@ -274,8 +334,6 @@ class DemandStream:
                 elif self.distribution_type == "Normal":
                     stdev = (vtm*self.mean)**0.5
                     self.dist_os = [self.mean, stdev]
-
-
 
         # Leadtime variation
         if self.lt_random == 1:
@@ -333,11 +391,16 @@ class DemandStream:
         if self.grab_random == 1:
             stream_nr += 1
             if self.distribution_type == "Discrete":
-                # Amount of grabbing is determined with a binomial
-                # distribution (repeat trials)
-                self.stream_grab = FlipDraw(stream_nr,
-                                            sample=sample_size,
-                                            p=self.lifo)
+                if self.lifo > 0.:
+                    # Amount of grabbing is determined with a binomial
+                    # distribution (repeat trials)
+                    self.stream_grab = FlipDraw(stream_nr,
+                                                sample=sample_size,
+                                                p=self.lifo)
+                else:
+                    # Amount of grabbing is based on the probability of old inventory
+                    self.stream_grab = DistDraw(stream_nr,
+                                                sample=sample_size)
             else:
                 # Amount of grabbing is determined with a triangular
                 # distribution
@@ -390,23 +453,28 @@ class DemandStream:
             if demand != 0. or first:
                 no_demand = False
 
-        # Grabbing?
-        demand_lifo = self.lifo_demand(demand)
-        return iat, demand, demand_lifo
+        return iat, demand
 
-    def lifo_demand(self, demand):
+    def gen_lifo_demand(self, demand, ioh=None, old=None):
         """ Returns the grabbing (LIFO) part of the demand. """
-        if self.lifo == 0:
-            # 100% FIFO, no LIFO
-            return 0
-        if self.lifo == 1:
-            # 0% FIFO, only LIFO
-            return demand
         # Mixed FIFO-LIFO
         if self.distribution_type == "Discrete":
-            # Amount of grabbing is determined with a binomial
-            # distribution (repeat trials)
-            return self.stream_grab.rvs(t=int(demand))
+            if ioh is None:
+                # Amount of grabbing is determined with a binomial
+                # distribution (repeat trials)
+                return self.stream_grab.rvs(t=int(demand))
+            # Amount of grabbing is determined by probability of old inventory
+            # Create copy of demand
+            rem_demand = copy.copy(demand)
+            demand_lifo = 0
+            prob_lifo = 0.
+            if ioh > 0:
+                prob_lifo = 1.0 - old/ioh
+            while rem_demand > 0:
+                if self.stream_grab.rvs() < prob_lifo:
+                    demand_lifo += 1
+                rem_demand -= 1
+            return demand_lifo
         # Amount of grabbing is determined with a triangular
         # distribution
         return demand*self.stream_grab.rvs()
@@ -781,11 +849,22 @@ class ReviewPeriodStatus:
 class StockPoint:
     """ Class to describe a stock point. """
 
-    def __init__(self, sku_param, sim_param, weekfractions):
+    def __init__(self, sku_param, sim_param,
+                 week_fractions, week_schedule, week_rols):
         # SKU parameters
         self.sku_param = sku_param
         # Simulation parameters:
         self.sim_param = sim_param
+        # Week pattern
+        if week_fractions is None:
+            self.week_pattern = False
+        else:
+            self.week_pattern = True
+        # Schedule
+        self.schedule = OrderSchedule(sku_param["leadtime"],
+                                      reviewperiod=sku_param["reviewperiod"],
+                                      schedule=week_schedule,
+                                      week_pattern=self.week_pattern)
 
         # Create result structure
         self.sim_res = SimResult(sku_param, report_pmfs=self.sim_param["reportpmfs"])
@@ -800,13 +879,15 @@ class StockPoint:
 
         self.demand = []
         self.rol = []
-        if self.sim_param["weekpattern"]:
-            self.rol = self._set_rol(sku_param, weekfractions)
-            # self.rol = [sku_param["reorderlevel"]] * MAXWEEKDAYS
+        if self.week_pattern:
             for weekday in range(MAXWEEKDAYS):
                 self.demand.append(DemandStream(sku_param, sim_param,
                                                 weekday=weekday,
-                                                weekfraction=weekfractions[weekday]))
+                                                weekfraction=week_fractions[weekday]))
+                if week_rols is None:
+                    self.rol.append(sku_param["reorderlevel"])
+                else:
+                    self.rol.append(week_rols[weekday])
         else:
             self.demand.append(DemandStream(sku_param, sim_param))
             self.rol.append(sku_param["reorderlevel"])
@@ -843,43 +924,12 @@ class StockPoint:
             self.stats_sum[key][1] = 0.
 
         # Init random streams
-        if self.sim_param["weekpattern"]:
+        if self.week_pattern:
             for weekday in range(MAXWEEKDAYS):
                 if self.demand[weekday].mean > dobr.EPS:
                     self.demand[weekday].reset_streams(repeat)
         else:
             self.demand[0].reset_streams(repeat)
-
-    def _set_rol(self, sku_param, weekfractions):
-        """ Determine the reorder levels per weekday. """
-        rol_list = []
-
-        # First, find the peak R+L demand
-        mean_week = sku_param["mean_perioddemand"] * MAXWEEKDAYS
-        peak_day = 0
-        peak_frac_rl = 0.
-        for weekday in range(MAXWEEKDAYS):
-            frac_rl = 0.
-            t = weekday
-            for _ in range(int(sku_param["reviewperiod"]
-                                + sku_param["leadtime"])):
-                t = cycle_ref(t, weekpattern=self.sim_param["weekpattern"])
-                frac_rl += weekfractions[t]
-            if peak_day == 0 or frac_rl > peak_frac_rl:
-                peak_day = weekday
-                peak_frac_rl = frac_rl
-        # Safety stock is based on the peak
-        ss = sku_param["reorderlevel"] - peak_frac_rl*mean_week
-        for weekday in range(MAXWEEKDAYS):
-            frac_rl = 0.
-            t = weekday
-            for _ in range(int(sku_param["reviewperiod"]
-                                + sku_param["leadtime"])):
-                t = cycle_ref(t, weekpattern=self.sim_param["weekpattern"])
-                frac_rl += weekfractions[t]
-            rol_day = max(1, int(math.ceil(ss + frac_rl*mean_week)))
-            rol_list.append(rol_day)
-        return rol_list
 
     def _add_sumstat(self, stat, value):
         if stat in self.stats_sum:
@@ -893,15 +943,28 @@ class StockPoint:
             self.stats_sum[stat][0] -= value
             self.stats_sum[stat][1] -= value**2
 
-    def event_sales(self, current_time, demand_data):
+    def event_sales(self, current_time, demand, weekday):
         """ Execute the sales process event. """
 
-        # Unpack demand tuple
-        demand = demand_data[0]
-        demand_lifo = demand_data[1]
+        # Register review period demand
         self.rp.demand += demand
         # Status before demand
-        prev_onhand = self.inv.onhand
+        prev_onhand = copy.copy(self.inv.onhand)
+        prev_onhand_old = copy.copy(self.inv.batches.book[0].onhand)
+
+        # Grabbing?
+        if self.sku_param["fifo"] == 1. or prev_onhand == prev_onhand_old:
+            # 100% FIFO, no LIFO (or with old equal to total inventory)
+            demand_lifo = 0
+        elif self.sku_param["fifo"] == 0.:
+            # 0% FIFO, only LIFO
+            demand_lifo = demand
+        elif self.sku_param["fifo"] == -1.:
+            # Hansen
+            demand_lifo = self.demand[weekday].gen_lifo_demand(demand,
+                ioh=prev_onhand, old=prev_onhand_old)
+        else:
+            demand_lifo = self.demand[weekday].gen_lifo_demand(demand)
 
         sales = 0.
         shelflife_sales = 0.
@@ -1008,8 +1071,9 @@ class StockPoint:
             rol = self.rol[weekday]
 
             # Apply EWA?
+            rl_1 = self.schedule.curr_rp(weekday) + self.schedule.next_lt(weekday) - 1
             if (self.inv.ip > 0 and self.sku_param["shelflife"] > 0 and self.sku_param["EWA"]
-                    and self.sku_param["leadtime"]+self.sku_param["reviewperiod"] > 1):
+                    and rl_1 > 0):
                 # Create a deep copy of the current inventory status
                 # for the projected (prj_) status
                 prj_onhand = self.inv.onhand
@@ -1022,23 +1086,22 @@ class StockPoint:
                 for i in range(len(self.inv.batches.book)):
                     prj_batches.append(copy.copy(self.inv.batches.book[i]))
 
-                lr_1 = self.sku_param["leadtime"]+self.sku_param["reviewperiod"]-1
                 carry_demand = 0.
                 prj_p = 1
-                if self.sim_param["weekpattern"]:
+                if self.week_pattern:
                     prj_weekday = cycle_ref(weekday)
                 else:
                     prj_weekday = 0
                 est_outdating = 0
                 est_shelflife_sales = 0
-                while prj_p <= int(math.ceil(lr_1)):
+                while prj_p <= int(math.ceil(rl_1)):
                     # Delivery of batches in the pipeline
                     if prj_ip > prj_onhand:
                         delivered = prj_batches.deliver(current_time+prj_p)
                         prj_onhand += delivered
                     # Demand
-                    if prj_p > lr_1:
-                        frac_p = lr_1-int(lr_1)
+                    if prj_p > rl_1:
+                        frac_p = rl_1-int(rl_1)
                     else:
                         frac_p = 1.
                     # EWA requires integer demands per period
@@ -1070,8 +1133,10 @@ class StockPoint:
                     est_outdating += est_out_onhand
                     # Next projected period
                     prj_p += 1
-                    if self.sim_param["weekpattern"]:
+                    if self.week_pattern:
                         prj_weekday = cycle_ref(prj_weekday)
+                    else:
+                        prj_weekday = 0
 
                 mod_ip = self.inv.ip - est_outdating
             else:
@@ -1098,14 +1163,14 @@ class StockPoint:
             delivery_moment += self.demand[weekday].stream_lt.rvs()
         else:
             # Deterministic or zero lead-time
-            delivery_moment += self.sku_param["leadtime"]
+            delivery_moment += self.schedule.curr_lt(weekday)
 
         # Positive order size?
         if ordersize > dobr.EPS:
             if self.sku_param["lostsales"] and self.sku_param["ROS"]:
                 # Bijvank & Johansen: limit to s*R/(L+R)
-                max_os = math.ceil(rol*self.sku_param["reviewperiod"]
-                    /(self.sku_param["leadtime"]+self.sku_param["reviewperiod"]))
+                max_os = math.ceil(rol*self.schedule.curr_rp(weekday)
+                    /(self.schedule.curr_rp(weekday) + self.schedule.next_lt(weekday)))
                 # Respect the MOQ
                 max_os = max(self.sku_param["moq"], max_os)
                 # Round to the nearest IOQ
@@ -1175,7 +1240,8 @@ class StockPoint:
                     fifo=True, backroom=True)
 
             # Fill the shelf
-            replenishment = min(self.inv.backroom, self.sku_param["shelfspace"] - self.inv.shelf())
+            replenishment = min(self.inv.backroom, 
+                                self.sku_param["shelfspace"] - self.inv.shelf())
             self.inv.backroom -= replenishment
             self.inv.batches.move_from_backroom(replenishment, current_time)
 
@@ -1299,7 +1365,7 @@ class StockPoint:
                 # Per review period
                 self.sim_res.put_kpi(self.stats_sum[kpi][0],
                     self.stats_sum[kpi][1],
-                    actual_nrperiods/self.sku_param["reviewperiod"], kpi)
+                    actual_nrperiods/self.schedule.avg_rp(), kpi)
 
         # Fill rate
         kpi = "Fillrate"
@@ -1322,11 +1388,17 @@ class StockPoint:
 class SimInventory:
     """ Class main event loop. """
 
-    def __init__(self, sku_list, sim_param, weekfractions=None):
+    def __init__(self, sku_list, sim_param,
+                 week_fractions=None, week_schedule=None, week_rols=None):
         """ Initialize the simulation object. """
 
         # Simulation parameters
         self.sim_param = sim_param
+        # Week pattern
+        if week_fractions is None:
+            self.week_pattern = False
+        else:
+            self.week_pattern = True
 
         # Event heap
         self.fes = None
@@ -1334,46 +1406,50 @@ class SimInventory:
         # Create stock points for each SKU that requires results
         self.stocks = []
         for sku_param in sku_list:
-            self.stocks.append(StockPoint(sku_param, sim_param, weekfractions))
+            self.stocks.append(StockPoint(sku_param, sim_param,
+                        week_fractions, week_schedule, week_rols))
 
     def single_repeat(self, repeat, output):
         """ Run a single repeat. """
 
         # Init event list
         self.fes = FES()
-        # Start clock
-        current_time = 0.
-        weekday = 0
-
         for sp in self.stocks:
             # Reset result structure
             sp.sim_res.reset()
             # Reset inventory status and stats for the repeat
             sp.reset_repeat(repeat)
-            if self.sim_param["weekpattern"]:
+            if self.week_pattern:
                 # Add first demand for each weekday
                 for weekday in range(MAXWEEKDAYS):
                     if sp.demand[weekday].mean > dobr.EPS:
-                        iat, demand, demand_lifo = (
+                        iat, demand = (
                             sp.demand[weekday].gen_next(0., first=True))
                         self.fes.add(EventData(weekday + iat,
                                                etype=DEMAND,
                                                item=sp,
-                                               data=(demand, demand_lifo)))
+                                               data=demand))
             else:
-                iat, demand, demand_lifo = sp.demand[weekday].gen_next(0.)
+                iat, demand = sp.demand[0].gen_next(0.)
                 self.fes.add(EventData(iat, etype=DEMAND, item=sp,
-                                       data=(demand, demand_lifo)))
+                                       data=demand))
 
-            # Add next inspection moment
-            self.fes.add(EventData(current_time+1.,
+            # Add first inspection moment
+            self.fes.add(EventData(0.,
                                    etype=INSPECT, item=sp))
-            # Add next review moment
-            self.fes.add(EventData(current_time+sp.sku_param["reviewperiod"],
+            # Add first review moment
+            weekday = 0
+            while not sp.schedule.review(weekday):
+                weekday += 1
+            self.fes.add(EventData(weekday,
                                    etype=REVIEW, item=sp))
 
-        # Add next end of period moment
-        self.fes.add(EventData(current_time+1., etype=ENDPERIOD))
+        # Add first end of period moment
+        self.fes.add(EventData(0., etype=ENDPERIOD))
+
+        # Start clock
+        current_time = 0.
+        weekday = 0
 
         # Start the event loop
         while (self.fes.size() > 0
@@ -1389,13 +1465,13 @@ class SimInventory:
             # Action depends on current event type
             # print(self.current_time, "Event", curr_event.etype)
             if curr_event.etype == DEMAND:
-                curr_sp.event_sales(current_time, curr_event.data)
+                curr_sp.event_sales(current_time, curr_event.data, weekday)
                 # Generate next demand
-                iat, demand, demand_lifo = curr_sp.demand[weekday].gen_next(current_time)
+                iat, demand = curr_sp.demand[weekday].gen_next(current_time)
                 self.fes.add(EventData(current_time+iat,
                                        etype=DEMAND,
                                        item=curr_sp,
-                                       data=(demand, demand_lifo)))
+                                       data=demand))
             elif curr_event.etype == INSPECT:
                 curr_sp.event_inspect(current_time)
                 # Add next inspection moment
@@ -1412,7 +1488,7 @@ class SimInventory:
                                        data=delivery_batch))
                 # Add next review moment
                 self.fes.add(EventData(current_time +
-                                       curr_sp.sku_param["reviewperiod"],
+                                       curr_sp.schedule.curr_rp(weekday),
                                        etype=REVIEW,
                                        item=curr_sp))
             elif curr_event.etype == DELIVERY:
@@ -1426,8 +1502,8 @@ class SimInventory:
                 for sp in self.stocks:
                     sp.event_endperiod(current_time)
                 # Set weekday
-                weekday = cycle_ref(weekday,
-                                    weekpattern=self.sim_param["weekpattern"])
+                if self.week_pattern:
+                    weekday = cycle_ref(weekday)
                 # Add next end of period moment
                 self.fes.add(EventData(current_time+1.,
                                        etype=ENDPERIOD))
