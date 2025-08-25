@@ -90,6 +90,8 @@ def update_cycle(gui, gui_queue):
                 cores = 1               # Use single core to avoid overhead
             elif cores > MAX_CORES:
                 cores = MAX_CORES       # Limit number of cores to improve responsiveness
+            # DEBUG
+            # cores = 1
 
             # Start the timer
             if cores == 1:
@@ -427,8 +429,8 @@ class DobrDashboard():
             # File with parameters not found: use defaults
             self.sim_param = dict(dobr_invsim.DEFAULT_SIM)
         # Reset depending on dashboard cofiguration
-        if not self.dash["weekpattern"]:
-            self.sim_param["weekpattern"] = False
+        if self.dash["weekpattern"]:
+            self.dash["nr_skus"] = 1        # Limit to 1 SKU
 
         # Validation functions of the simulation parameters
         self.sim_val_functions = {}
@@ -450,6 +452,14 @@ class DobrDashboard():
         if self.dash["weekpattern"]:
             # Default week pattern = Kahn & Schmittlein
             self.week_fractions = [0.12, 0.13, 0.13, 0.16, 0.18, 0.18, 0.1]
+            self.schedule = [1]*dobr_invsim.MAXWEEKDAYS
+            self.rols = [1]*dobr_invsim.MAXWEEKDAYS
+            self.skus[0].param["leadtime"] = 1
+            self.skus[0].param["reviewperiod"] = 1
+        else:
+            self.week_fractions = None
+            self.schedule = None
+            self.rols = None
 
         # Validation functions of the parameters
         self.val_functions = {}
@@ -520,48 +530,49 @@ class DobrDashboard():
                     self.chk_ls[sku.nbr].toggle()
 
         # Parameter lead time
-        row_nr += 1
-        tk.Label(self.frame_parameters, text="Mean lead time").grid(
-            row=row_nr, column=0, sticky=tk.W)
-        self.ent_leadtime = []
-        self.val_functions["leadtime"] = self._val_leadtime
-        for sku in self.skus:
-            # We use a lambda function to pass the sku_nr to the
-            # validation command. By using sku=sku, we fix the parameter
-            self.ent_leadtime.append(tk.Entry(
-                self.frame_parameters, width=14, justify=tk.RIGHT,
-                validate="focusout",
-                validatecommand=lambda sku=sku: self._val_leadtime(sku)))
-            self.ent_leadtime[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
-            self.ent_leadtime[sku.nbr].insert(0, sku.param["leadtime"])
+        if not self.dash["weekpattern"]:
+            row_nr += 1
+            tk.Label(self.frame_parameters, text="Mean lead time").grid(
+                row=row_nr, column=0, sticky=tk.W)
+            self.ent_leadtime = []
+            self.val_functions["leadtime"] = self._val_leadtime
+            for sku in self.skus:
+                # We use a lambda function to pass the sku_nr to the
+                # validation command. By using sku=sku, we fix the parameter
+                self.ent_leadtime.append(tk.Entry(
+                    self.frame_parameters, width=14, justify=tk.RIGHT,
+                    validate="focusout",
+                    validatecommand=lambda sku=sku: self._val_leadtime(sku)))
+                self.ent_leadtime[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
+                self.ent_leadtime[sku.nbr].insert(0, sku.param["leadtime"])
 
-        # Parameter stdev_leadtime
-        row_nr += 1
-        tk.Label(self.frame_parameters, text="StDev lead time").grid(
-            row=row_nr, column=0, sticky=tk.W)
-        self.ent_stdev_leadtime = []
-        self.val_functions["stdev_leadtime"] = self._val_stdev_leadtime
-        for sku in self.skus:
-            self.ent_stdev_leadtime.append(tk.Entry(
-                self.frame_parameters, width=14, justify=tk.RIGHT,
-                validate="focusout",
-                validatecommand=lambda sku=sku: self._val_stdev_leadtime(sku)))
-            self.ent_stdev_leadtime[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
-            self.ent_stdev_leadtime[sku.nbr].insert(0, sku.param["stdev_leadtime"])
+            # Parameter stdev_leadtime
+            row_nr += 1
+            tk.Label(self.frame_parameters, text="StDev lead time").grid(
+                row=row_nr, column=0, sticky=tk.W)
+            self.ent_stdev_leadtime = []
+            self.val_functions["stdev_leadtime"] = self._val_stdev_leadtime
+            for sku in self.skus:
+                self.ent_stdev_leadtime.append(tk.Entry(
+                    self.frame_parameters, width=14, justify=tk.RIGHT,
+                    validate="focusout",
+                    validatecommand=lambda sku=sku: self._val_stdev_leadtime(sku)))
+                self.ent_stdev_leadtime[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
+                self.ent_stdev_leadtime[sku.nbr].insert(0, sku.param["stdev_leadtime"])
 
-        # Parameter reviewperiod
-        row_nr += 1
-        tk.Label(self.frame_parameters, text="Review period").grid(
-            row=row_nr, column=0, sticky=tk.W)
-        self.ent_reviewperiod = []
-        self.val_functions["reviewperiod"] = self._val_reviewperiod
-        for sku in self.skus:
-            self.ent_reviewperiod.append(tk.Entry(
-                self.frame_parameters, width=14, justify=tk.RIGHT,
-                validate="focusout",
-                validatecommand=lambda sku=sku: self._val_reviewperiod(sku)))
-            self.ent_reviewperiod[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
-            self.ent_reviewperiod[sku.nbr].insert(0, sku.param["reviewperiod"])
+            # Parameter reviewperiod
+            row_nr += 1
+            tk.Label(self.frame_parameters, text="Review period").grid(
+                row=row_nr, column=0, sticky=tk.W)
+            self.ent_reviewperiod = []
+            self.val_functions["reviewperiod"] = self._val_reviewperiod
+            for sku in self.skus:
+                self.ent_reviewperiod.append(tk.Entry(
+                    self.frame_parameters, width=14, justify=tk.RIGHT,
+                    validate="focusout",
+                    validatecommand=lambda sku=sku: self._val_reviewperiod(sku)))
+                self.ent_reviewperiod[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
+                self.ent_reviewperiod[sku.nbr].insert(0, sku.param["reviewperiod"])
 
         # Parameter mean period demand (mean)
         row_nr += 1
@@ -620,22 +631,23 @@ class DobrDashboard():
                 self.ent_moq[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
                 self.ent_moq[sku.nbr].insert(0, sku.param["moq"])
 
-        # Parameter reorder level (rol)
-        row_nr += 1
-        tk.Label(self.frame_parameters, text="Reorder level").grid(
-            row=row_nr, column=0, sticky=tk.W)
-        self.ent_rol = []
-        self.val_functions["reorderlevel"] = self._val_rol
-        for sku in self.skus:
-            self.ent_rol.append(tk.Entry(
-                self.frame_parameters, width=14, justify=tk.RIGHT,
-                validate="focusout",
-                validatecommand=lambda sku=sku: self._val_rol(sku)))
-            self.ent_rol[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
-            self.ent_rol[sku.nbr].insert(0, sku.param["reorderlevel"])
-            if sku.nbr > 0:
-                # Initial, the reorder level is different for the alternative(s)
-                self.ent_rol[sku.nbr].configure(bg="aquamarine")
+        if not self.dash["weekpattern"]:
+            # Parameter reorder level (rol)
+            row_nr += 1
+            tk.Label(self.frame_parameters, text="Reorder level").grid(
+                row=row_nr, column=0, sticky=tk.W)
+            self.ent_rol = []
+            self.val_functions["reorderlevel"] = self._val_rol
+            for sku in self.skus:
+                self.ent_rol.append(tk.Entry(
+                    self.frame_parameters, width=14, justify=tk.RIGHT,
+                    validate="focusout",
+                    validatecommand=lambda sku=sku: self._val_rol(sku)))
+                self.ent_rol[sku.nbr].grid(row=row_nr, column=sku.nbr+1)
+                self.ent_rol[sku.nbr].insert(0, sku.param["reorderlevel"])
+                if sku.nbr > 0:
+                    # Initial, the reorder level is different for the alternative(s)
+                    self.ent_rol[sku.nbr].configure(bg="aquamarine")
 
         if self.dash["retops"] or self.dash["simulation"]:
             # Shelf life related parameters
@@ -783,16 +795,6 @@ class DobrDashboard():
             self.frame_wp.grid(
                 row=0, column=root_col_nr, padx=5, pady=5, sticky=tk.N)
 
-            self.wp_var = tk.IntVar()
-            self.chk_wp = tk.Checkbutton(
-                self.frame_wp, text="Apply", width=6, justify=tk.RIGHT,
-                variable=self.wp_var,
-                command=self._val_wp)
-            self.chk_wp.grid(row=0, column=0)
-            self.chk_wp.configure(bg="white", relief=tk.RIDGE)
-            if self.sim_param["weekpattern"]:
-                self.chk_wp.toggle()
-
             tk.Label(self.frame_wp, text="Fraction").grid(
                 row=0, column=1, sticky=tk.E)
             self.ent_wf = []
@@ -800,11 +802,33 @@ class DobrDashboard():
                 tk.Label(self.frame_wp, text=f"{WEEKDAYS[day]}").grid(
                     row=day+1, column=0, padx=5, sticky=tk.W)
                 self.ent_wf.append(tk.Entry(
-                    self.frame_wp, width=10, justify=tk.RIGHT,
+                    self.frame_wp, width=14, justify=tk.RIGHT,
                         validate="focusout",
                         validatecommand=lambda day=day: self._val_wf(day)))
                 self.ent_wf[day].grid(row=day+1, column=1, padx=5)
                 self.ent_wf[day].insert(0, self.week_fractions[day])
+
+            tk.Label(self.frame_wp, text="Lead time").grid(
+                row=0, column=2, sticky=tk.E)
+            self.ent_wlt = []
+            for day in range(dobr_invsim.MAXWEEKDAYS):
+                self.ent_wlt.append(tk.Entry(
+                    self.frame_wp, width=14, justify=tk.RIGHT,
+                        validate="focusout",
+                        validatecommand=lambda day=day: self._val_wlt(day)))
+                self.ent_wlt[day].grid(row=day+1, column=2, padx=5)
+                self.ent_wlt[day].insert(0, self.schedule[day])
+
+            tk.Label(self.frame_wp, text="Reorder level").grid(
+                row=0, column=3, sticky=tk.E)
+            self.ent_wrol = []
+            for day in range(dobr_invsim.MAXWEEKDAYS):
+                self.ent_wrol.append(tk.Entry(
+                    self.frame_wp, width=14, justify=tk.RIGHT,
+                        validate="focusout",
+                        validatecommand=lambda day=day: self._val_wrol(day)))
+                self.ent_wrol[day].grid(row=day+1, column=3, padx=5)
+                self.ent_wrol[day].insert(0, self.rols[day])
 
         # Set the KPI frame
         root_col_nr += 1
@@ -1570,14 +1594,6 @@ class DobrDashboard():
             self._reset_redo_sim()
         return correct
 
-    def _val_wp(self):
-        """ Validate the week pattern parameter. """
-        self.sim_param["weekpattern"] = bool(self.wp_var.get())
-        self._reset_kpi_results(sim_only=True)
-        self.new_simoptions = True
-        self._reset_redo_sim()
-        return True
-
     def _val_wf(self, day):
         """ Validate the week fraction. """
         correct, input_value = validate_generic(self.ent_wf[day],
@@ -1590,15 +1606,27 @@ class DobrDashboard():
             self._reset_redo_sim()
         return correct
 
-    # def _val_wlt(self, day):
-    #     """ Validate the schedule. """
-    #     correct, input_value = validate_generic(self.ent_wlt[day])
-    #     if correct and self.wlt[day] != input_value:
-    #         self.wlt[day] = float(input_value)
-    #         self._reset_kpi_results(sim_only=True)
-    #         self.new_simoptions = True
-    #         self._reset_redo_sim()
-    #     return correct
+    def _val_wlt(self, day):
+        """ Validate the schedule. """
+        correct, input_value = validate_generic(self.ent_wlt[day],
+                                                int_val=True)
+        if correct and self.schedule[day] != input_value:
+            self.schedule[day] = int(input_value)
+            self._reset_kpi_results(sim_only=True)
+            self.new_simoptions = True
+            self._reset_redo_sim()
+        return correct
+
+    def _val_wrol(self, day):
+        """ Validate the schedule. """
+        correct, input_value = validate_generic(self.ent_wrol[day],
+                                                int_val=True)
+        if correct and self.rols[day] != input_value:
+            self.rols[day] = int(input_value)
+            self._reset_kpi_results(sim_only=True)
+            self.new_simoptions = True
+            self._reset_redo_sim()
+        return correct
 
     def _val_tfr(self):
         """ Validate the target fill rate parameter. """
@@ -1647,6 +1675,9 @@ class DobrDashboard():
             try:
                 with open("dobr_defaults.json", "w",
                           encoding="utf8") as fp_def:
+                    if self.dash["weekpattern"]:
+                        sku.param["leadtime"] = 1
+                        sku.param["reviewperiod"] = 1
                     json.dump(sku.param, fp_def)
             except IOError:
                 self.update_statusbar(
@@ -1790,7 +1821,7 @@ class DobrDashboard():
                     self._reset_kpi_results(sku)
                     self.update_statusbar("Scenario " + sku.name
                         + " returned error: "
-                        + dobr.ERROR_CODES[self.system_ana[sku.nr].dobr_error])
+                        + dobr.ERROR_CODES[self.system_ana[sku.nbr].dobr_error])
 
             if not sku.correct:
                 any_errors = True
@@ -1883,9 +1914,11 @@ class DobrDashboard():
                 # self.btn_plot_w["state"] = tk.DISABLED
 
                 # Create simulation object
-                if self.sim_param["weekpattern"]:
+                if self.dash["weekpattern"]:
                     sim = dobr_invsim.SimInventory(sku_sim_list, self.sim_param,
-                        weekfractions=self.week_fractions)
+                        week_fractions=self.week_fractions,
+                        week_schedule=self.schedule,
+                        week_rols=self.rols)
                 else:
                     sim = dobr_invsim.SimInventory(sku_sim_list, self.sim_param)
                 # Put simulation object on the queue
